@@ -45,20 +45,49 @@ static void get_hint_size(screen_t scr, int *w, int *h)
 	*h = (sh * config_get_int("hint_size")) / 1000;
 }
 
+static int get_hint_label_len()
+{
+	int len = config_get_int("hint_label_len");
+
+	/* Fullscreen hints are arranged in an NxN grid and need >=2 chars. */
+	if (len < 2)
+		return 2;
+	if (len > 15)
+		return 15;
+
+	return len;
+}
+
 static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 {
 	int sw, sh;
 	int w, h;
-	int i, j;
+	int col, row, k;
 	size_t n = 0;
 
 	const char *chars = config_get("hint_chars");
+	const int label_len = get_hint_label_len();
 	get_hint_size(scr, &w, &h);
 	platform->screen_get_dimensions(scr, &sw, &sh);
 
-	const int nr = strlen(chars);
-	const int nc = strlen(chars);
+	const int base = strlen(chars);
+	size_t total = 1;
+	int nc, nr;
 
+	for (k = 0; k < label_len; k++) {
+		if (total > MAX_HINTS / (size_t)base) {
+			total = MAX_HINTS;
+			break;
+		}
+		total *= (size_t)base;
+	}
+	if (total > MAX_HINTS)
+		total = MAX_HINTS;
+
+	nc = 1;
+	while ((size_t)nc * (size_t)nc < total)
+		nc++;
+	nr = (int)((total + (size_t)nc - 1) / (size_t)nc);
 
 	const int colgap = sw / nc - w;
 	const int rowgap = sh / nr - h;
@@ -71,9 +100,15 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 
 	get_hint_size(scr, &w, &h);
 
-	for (i = 0; i < nc; i++) {
-		for (j = 0; j < nr; j++) {
-			struct hint *hint = &hints[n++];
+	for (col = 0; col < nc; col++) {
+		for (row = 0; row < nr; row++) {
+			size_t idx = (size_t)col * (size_t)nr + (size_t)row;
+			size_t tmp = idx;
+			struct hint *hint;
+
+			if (idx >= total)
+				break;
+			hint = &hints[n++];
 
 			hint->x = x;
 			hint->y = y;
@@ -81,9 +116,11 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 			hint->w = w;
 			hint->h = h;
 
-			hint->label[0] = chars[i];
-			hint->label[1] = chars[j];
-			hint->label[2] = 0;
+			for (k = label_len - 1; k >= 0; k--) {
+				hint->label[k] = chars[tmp % (size_t)base];
+				tmp /= (size_t)base;
+			}
+			hint->label[label_len] = 0;
 
 			y += rowgap + h;
 		}
@@ -140,13 +177,15 @@ static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 
 			if (!name || name[1])
 				continue;
+			if ((size_t)len + 1 >= sizeof buf)
+				continue;
 
 			buf[len++] = name[0];
 		}
 
 		filter(scr, buf);
 
-		if (nr_matched == 1) {
+		if (nr_matched == 1 && !strcmp(buf, matched[0].label)) {
 			int nx, ny;
 			struct hint *h = &matched[0];
 
