@@ -5,6 +5,8 @@
  */
 
 #include "warpd.h"
+#include <stdarg.h>
+#include <stdlib.h>
 
 struct hint *hints;
 struct hint matched[MAX_HINTS];
@@ -14,19 +16,137 @@ static size_t nr_matched;
 
 char last_selected_hint[32];
 
-static void filter(screen_t scr, const char *s)
+enum hint_key_action {
+	HINT_KEY_NONE = 0,
+	HINT_KEY_EXIT,
+	HINT_KEY_UNDO_ALL,
+	HINT_KEY_UNDO,
+	HINT_KEY_APPEND_CHAR,
+	HINT_KEY_IGNORED_NON_CHAR,
+	HINT_KEY_IGNORED_BUF_FULL,
+};
+
+struct hint_filter_timing {
+	uint64_t match_us;
+	uint64_t clear_us;
+	uint64_t draw_us;
+	uint64_t commit_us;
+	uint64_t total_us;
+};
+
+static struct {
+	int initialized;
+	int enabled;
+	int min_us;
+	FILE *stream;
+	uint64_t session_id;
+	uint64_t batch_seq;
+	uint64_t key_seq;
+} hint_tm_state;
+
+static const char *hint_key_action_tostr(enum hint_key_action action)
+{
+	switch (action) {
+	case HINT_KEY_EXIT:
+		return "exit";
+	case HINT_KEY_UNDO_ALL:
+		return "undo_all";
+	case HINT_KEY_UNDO:
+		return "undo";
+	case HINT_KEY_APPEND_CHAR:
+		return "append_char";
+	case HINT_KEY_IGNORED_NON_CHAR:
+		return "ignored_non_char";
+	case HINT_KEY_IGNORED_BUF_FULL:
+		return "ignored_buf_full";
+	default:
+		return "none";
+	}
+}
+
+static int hint_tm_enabled()
+{
+	if (hint_tm_state.initialized)
+		return hint_tm_state.enabled;
+
+	hint_tm_state.initialized = 1;
+	hint_tm_state.enabled = 0;
+	hint_tm_state.min_us = 0;
+	hint_tm_state.stream = stderr;
+
+	const char *enabled = getenv("WARPD_HINT_TELEMETRY");
+	if (!enabled || !enabled[0] || !strcmp(enabled, "0"))
+		return 0;
+
+	hint_tm_state.enabled = 1;
+
+	const char *path = getenv("WARPD_HINT_TELEMETRY_FILE");
+	if (path && path[0]) {
+		FILE *f = fopen(path, "a");
+		if (f)
+			hint_tm_state.stream = f;
+	}
+
+	const char *min_us = getenv("WARPD_HINT_TELEMETRY_MIN_US");
+	if (min_us && min_us[0]) {
+		int val = atoi(min_us);
+		if (val > 0)
+			hint_tm_state.min_us = val;
+	}
+
+	return hint_tm_state.enabled;
+}
+
+static void hint_tm_log(const char *kind, const char *fmt, ...)
+{
+	if (!hint_tm_enabled())
+		return;
+
+	FILE *out = hint_tm_state.stream ? hint_tm_state.stream : stderr;
+	uint64_t ts = get_time_us();
+	va_list ap;
+
+	fprintf(out, "hint_tm ts_us=%llu sid=%llu kind=%s ",
+		(unsigned long long)ts,
+		(unsigned long long)hint_tm_state.session_id,
+		kind);
+
+	va_start(ap, fmt);
+	vfprintf(out, fmt, ap);
+	va_end(ap);
+
+	fputc('\n', out);
+	fflush(out);
+}
+
+static void filter(screen_t scr, const char *s, struct hint_filter_timing *timing)
 {
 	size_t i;
+	uint64_t t0, t1, t2, t3, t4;
+
+	t0 = get_time_us();
 
 	nr_matched = 0;
 	for (i = 0; i < nr_hints; i++) {
 		if (strstr(hints[i].label, s) == hints[i].label)
 			matched[nr_matched++] = hints[i];
 	}
+	t1 = get_time_us();
 
 	platform->screen_clear(scr);
+	t2 = get_time_us();
 	platform->hint_draw(scr, matched, nr_matched);
+	t3 = get_time_us();
 	platform->commit();
+	t4 = get_time_us();
+
+	if (timing) {
+		timing->match_us = t1 - t0;
+		timing->clear_us = t2 - t1;
+		timing->draw_us = t3 - t2;
+		timing->commit_us = t4 - t3;
+		timing->total_us = t4 - t0;
+	}
 }
 
 static void get_hint_size(screen_t scr, int *w, int *h)
@@ -138,19 +258,28 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 	return n;
 }
 
-static int process_hint_event(struct input_event *ev, char *buf, int *rc, int *state_changed)
+static int process_hint_event(struct input_event *ev, char *buf, int *rc,
+			      int *state_changed, enum hint_key_action *action)
 {
 	ssize_t len = strlen(buf);
+	if (action)
+		*action = HINT_KEY_NONE;
 
 	if (config_input_match(ev, "hint_exit")) {
+		if (action)
+			*action = HINT_KEY_EXIT;
 		*rc = -1;
 		return -1;
 	} else if (config_input_match(ev, "hint_undo_all")) {
+		if (action)
+			*action = HINT_KEY_UNDO_ALL;
 		if (len) {
 			buf[0] = 0;
 			*state_changed = 1;
 		}
 	} else if (config_input_match(ev, "hint_undo")) {
+		if (action)
+			*action = HINT_KEY_UNDO;
 		if (len) {
 			buf[len - 1] = 0;
 			*state_changed = 1;
@@ -158,14 +287,22 @@ static int process_hint_event(struct input_event *ev, char *buf, int *rc, int *s
 	} else {
 		const char *name = input_event_tostr(ev);
 
-		if (!name || name[1])
+		if (!name || name[1]) {
+			if (action)
+				*action = HINT_KEY_IGNORED_NON_CHAR;
 			return 0;
-		if ((size_t)len + 1 >= 32)
+		}
+		if ((size_t)len + 1 >= 32) {
+			if (action)
+				*action = HINT_KEY_IGNORED_BUF_FULL;
 			return 0;
+		}
 
 		buf[len] = name[0];
 		buf[len + 1] = 0;
 		*state_changed = 1;
+		if (action)
+			*action = HINT_KEY_APPEND_CHAR;
 	}
 
 	return 0;
@@ -176,7 +313,23 @@ static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 	hints = _hints;
 	nr_hints = _nr_hints;
 
-	filter(scr, "");
+	int telemetry_on = hint_tm_enabled();
+	hint_tm_state.session_id++;
+	hint_tm_state.batch_seq = 0;
+	hint_tm_state.key_seq = 0;
+
+	struct hint_filter_timing timing;
+	filter(scr, "", telemetry_on ? &timing : NULL);
+
+	if (telemetry_on)
+		hint_tm_log("session_start",
+			    "hints=%llu matched=%llu init_total_us=%llu init_match_us=%llu init_draw_us=%llu init_commit_us=%llu",
+			    (unsigned long long)nr_hints,
+			    (unsigned long long)nr_matched,
+			    (unsigned long long)timing.total_us,
+			    (unsigned long long)timing.match_us,
+			    (unsigned long long)timing.draw_us,
+			    (unsigned long long)timing.commit_us);
 
 	int rc = 0;
 	char buf[32] = {0};
@@ -196,14 +349,43 @@ static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 		struct input_event *ev = platform->input_next_event(0);
 		int state_changed = 0;
 		int drained = 0;
+		int pressed_events = 0;
+		uint64_t queue_start_us = get_time_us();
 
 		if (!ev)
 			continue;
 
 		do {
 			if (ev->pressed) {
-				if (process_hint_event(ev, buf, &rc, &state_changed) < 0)
+				enum hint_key_action action;
+				size_t before_len = strlen(buf);
+				pressed_events++;
+				hint_tm_state.key_seq++;
+
+				if (process_hint_event(ev, buf, &rc, &state_changed,
+						       &action) < 0) {
+					if (telemetry_on)
+						hint_tm_log("outcome",
+							    "reason=exit key_seq=%llu drained=%d pressed=%d queue_us=%llu",
+							    (unsigned long long)hint_tm_state.key_seq,
+							    drained,
+							    pressed_events,
+							    (unsigned long long)(get_time_us() - queue_start_us));
 					goto done;
+				}
+
+				if (telemetry_on) {
+					size_t after_len = strlen(buf);
+					hint_tm_log("key",
+						    "key_seq=%llu code=%u mods=%u action=%s before_len=%llu after_len=%llu state_changed=%d",
+						    (unsigned long long)hint_tm_state.key_seq,
+						    ev->code,
+						    ev->mods,
+						    hint_key_action_tostr(action),
+						    (unsigned long long)before_len,
+						    (unsigned long long)after_len,
+						    state_changed);
+				}
 			}
 			drained++;
 			if (drained >= 32)
@@ -216,10 +398,38 @@ static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 			ev = platform->input_next_event(1);
 		} while (ev);
 
+		if (telemetry_on) {
+			hint_tm_state.batch_seq++;
+			hint_tm_log("batch",
+				    "batch=%llu drained=%d pressed=%d queue_us=%llu state_changed=%d",
+				    (unsigned long long)hint_tm_state.batch_seq,
+				    drained,
+				    pressed_events,
+				    (unsigned long long)(get_time_us() - queue_start_us),
+				    state_changed);
+		}
+
 		if (!state_changed)
 			continue;
 
-		filter(scr, buf);
+		filter(scr, buf, telemetry_on ? &timing : NULL);
+
+		if (telemetry_on &&
+		    (!hint_tm_state.min_us ||
+		     timing.total_us >= (uint64_t)hint_tm_state.min_us)) {
+			hint_tm_log("render",
+				    "batch=%llu buf_len=%llu matched=%llu match_us=%llu clear_us=%llu draw_us=%llu commit_us=%llu total_us=%llu drained=%d pressed=%d",
+				    (unsigned long long)hint_tm_state.batch_seq,
+				    (unsigned long long)strlen(buf),
+				    (unsigned long long)nr_matched,
+				    (unsigned long long)timing.match_us,
+				    (unsigned long long)timing.clear_us,
+				    (unsigned long long)timing.draw_us,
+				    (unsigned long long)timing.commit_us,
+				    (unsigned long long)timing.total_us,
+				    drained,
+				    pressed_events);
+		}
 
 		if (nr_matched == 1 && !strcmp(buf, matched[0].label)) {
 			int nx, ny;
@@ -239,8 +449,16 @@ static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 
 			platform->mouse_move(scr, nx, ny);
 			strcpy(last_selected_hint, buf);
+			if (telemetry_on)
+				hint_tm_log("outcome",
+					    "reason=selected label=%s",
+					    buf);
 			break;
 		} else if (nr_matched == 0) {
+			if (telemetry_on)
+				hint_tm_log("outcome",
+					    "reason=no_match buf_len=%llu",
+					    (unsigned long long)strlen(buf));
 			break;
 		}
 	}
@@ -251,6 +469,12 @@ done:
 	platform->mouse_show();
 
 	platform->commit();
+	if (telemetry_on)
+		hint_tm_log("session_end",
+			    "rc=%d final_buf_len=%llu selected=%s",
+			    rc,
+			    (unsigned long long)strlen(buf),
+			    last_selected_hint[0] ? last_selected_hint : "-");
 	return rc;
 }
 
