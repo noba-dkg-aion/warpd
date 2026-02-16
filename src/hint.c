@@ -211,40 +211,49 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 		total = total_hint_cap;
 
 	/*
-	 * Choose grid dimensions that minimize unused slots first, then keep an
-	 * aspect ratio close to the screen to avoid large empty regions.
+	 * Select a fully packed grid (rows*cols <= total) that fits hint boxes on
+	 * screen and maximizes used slots, then break ties by aspect ratio.
+	 * This avoids partially filled edge rows that look like random holes.
 	 */
 	{
+		int max_cols_fit = sw / w;
+		int max_rows_fit = sh / h;
 		int best_nc = 1;
-		int best_nr = (int)total;
+		int best_nr = 1;
+		size_t best_total = 0;
+		long long best_aspect_err = 0;
 		int have_best = 0;
-		size_t best_waste = (size_t)best_nc * (size_t)best_nr - total;
-		long long best_aspect_err =
-			llabs((long long)best_nc * (long long)sh -
-			      (long long)best_nr * (long long)sw);
 
-		for (int cand_nr = 1; cand_nr <= (int)total; cand_nr++) {
-			int cand_nc = (int)((total + (size_t)cand_nr - 1) /
-					    (size_t)cand_nr);
-			int cand_cell_w = sw / cand_nc;
-			int cand_cell_h = sh / cand_nr;
-			size_t cand_cap = (size_t)cand_nc * (size_t)cand_nr;
-			size_t cand_waste = cand_cap - total;
-			long long cand_aspect_err =
+		if (max_cols_fit < 1)
+			max_cols_fit = 1;
+		if (max_rows_fit < 1)
+			max_rows_fit = 1;
+
+		for (int cand_nr = 1;
+		     cand_nr <= max_rows_fit && (size_t)cand_nr <= total;
+		     cand_nr++) {
+			int max_nc_for_total = (int)(total / (size_t)cand_nr);
+			int cand_nc = max_nc_for_total;
+			size_t cand_total;
+			long long cand_aspect_err;
+
+			if (cand_nc > max_cols_fit)
+				cand_nc = max_cols_fit;
+			if (cand_nc < 1)
+				continue;
+
+			cand_total = (size_t)cand_nc * (size_t)cand_nr;
+			cand_aspect_err =
 				llabs((long long)cand_nc * (long long)sh -
 				      (long long)cand_nr * (long long)sw);
 
-			/* Skip layouts that cannot fit hint boxes without overlap. */
-			if (cand_cell_w < w || cand_cell_h < h)
-				continue;
-
 			if (!have_best ||
-			    cand_waste < best_waste ||
-			    (cand_waste == best_waste &&
+			    cand_total > best_total ||
+			    (cand_total == best_total &&
 			     cand_aspect_err < best_aspect_err)) {
 				best_nc = cand_nc;
 				best_nr = cand_nr;
-				best_waste = cand_waste;
+				best_total = cand_total;
 				best_aspect_err = cand_aspect_err;
 				have_best = 1;
 			}
@@ -253,11 +262,11 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 		if (have_best) {
 			nc = best_nc;
 			nr = best_nr;
+			total = best_total;
 		} else {
 			nc = 1;
-			while ((size_t)nc * (size_t)nc < total)
-				nc++;
-			nr = (int)((total + (size_t)nc - 1) / (size_t)nc);
+			nr = 1;
+			total = 1;
 		}
 	}
 
