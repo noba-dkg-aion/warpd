@@ -97,6 +97,7 @@ static struct {
 
 	{ "hint_size", "20", "Hint size (range: 1-1000)", OPT_INT },
 	{ "hint_border_radius", "3", "Border radius.", OPT_INT },
+	{ "hint_max_hints", "1024", "Maximum hints to generate in fullscreen mode; values below 1 fall back to the hard cap.", OPT_INT },
 
 	{ "hint_exit", "esc", "The exit key used for hint mode.", OPT_KEY },
 	{ "hint_undo", "backspace", "undo last selection step in one of the hint based modes.", OPT_KEY },

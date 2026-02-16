@@ -71,18 +71,24 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 	platform->screen_get_dimensions(scr, &sw, &sh);
 
 	const int base = strlen(chars);
+	const int max_hints_config = config_get_int("hint_max_hints");
+	size_t total_hint_cap = MAX_HINTS;
+
+	if (max_hints_config >= 1 && (size_t)max_hints_config < total_hint_cap)
+		total_hint_cap = (size_t)max_hints_config;
+
 	size_t total = 1;
 	int nc, nr;
 
 	for (k = 0; k < label_len; k++) {
-		if (total > MAX_HINTS / (size_t)base) {
-			total = MAX_HINTS;
+		if (total > total_hint_cap / (size_t)base) {
+			total = total_hint_cap;
 			break;
 		}
 		total *= (size_t)base;
 	}
-	if (total > MAX_HINTS)
-		total = MAX_HINTS;
+	if (total > total_hint_cap)
+		total = total_hint_cap;
 
 	nc = 1;
 	while ((size_t)nc * (size_t)nc < total)
@@ -132,6 +138,39 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 	return n;
 }
 
+static int process_hint_event(struct input_event *ev, char *buf, int *rc, int *state_changed)
+{
+	ssize_t len = strlen(buf);
+
+	if (config_input_match(ev, "hint_exit")) {
+		*rc = -1;
+		return -1;
+	} else if (config_input_match(ev, "hint_undo_all")) {
+		if (len) {
+			buf[0] = 0;
+			*state_changed = 1;
+		}
+	} else if (config_input_match(ev, "hint_undo")) {
+		if (len) {
+			buf[len - 1] = 0;
+			*state_changed = 1;
+		}
+	} else {
+		const char *name = input_event_tostr(ev);
+
+		if (!name || name[1])
+			return 0;
+		if ((size_t)len + 1 >= 32)
+			return 0;
+
+		buf[len] = name[0];
+		buf[len + 1] = 0;
+		*state_changed = 1;
+	}
+
+	return 0;
+}
+
 static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 {
 	hints = _hints;
@@ -154,34 +193,31 @@ static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 	config_input_whitelist(keys, sizeof keys / sizeof keys[0]);
 
 	while (1) {
-		struct input_event *ev;
-		ssize_t len;
+		struct input_event *ev = platform->input_next_event(0);
+		int state_changed = 0;
+		int drained = 0;
 
-		ev = platform->input_next_event(0);
-
-		if (!ev->pressed)
+		if (!ev)
 			continue;
 
-		len = strlen(buf);
+		do {
+			if (ev->pressed) {
+				if (process_hint_event(ev, buf, &rc, &state_changed) < 0)
+					goto done;
+			}
+			drained++;
+			if (drained >= 32)
+				break;
 
-		if (config_input_match(ev, "hint_exit")) {
-			rc = -1;
-			break;
-		} else if (config_input_match(ev, "hint_undo_all")) {
-			buf[0] = 0;
-		} else if (config_input_match(ev, "hint_undo")) {
-			if (len)
-				buf[len - 1] = 0;
-		} else {
-			const char *name = input_event_tostr(ev);
+			/*
+			 * Drain small bursts of queued key events and render once to
+			 * avoid input-lag buildup when hint drawing is expensive.
+			 */
+			ev = platform->input_next_event(1);
+		} while (ev);
 
-			if (!name || name[1])
-				continue;
-			if ((size_t)len + 1 >= sizeof buf)
-				continue;
-
-			buf[len++] = name[0];
-		}
+		if (!state_changed)
+			continue;
 
 		filter(scr, buf);
 
@@ -209,6 +245,7 @@ static int hint_selection(screen_t scr, struct hint *_hints, size_t _nr_hints)
 		}
 	}
 
+done:
 	platform->input_ungrab_keyboard();
 	platform->screen_clear(scr);
 	platform->mouse_show();
@@ -332,6 +369,10 @@ int history_hint_mode()
 	int w, h;
 	int sw, sh;
 	size_t n, i;
+	const char *hint_chars;
+	size_t hint_base;
+	int label_len;
+	size_t max_labels;
 
 	platform->mouse_get_position(&scr, NULL, NULL);
 	platform->screen_get_dimensions(scr, &sw, &sh);
@@ -340,6 +381,30 @@ int history_hint_mode()
 
 	get_hint_size(scr, &w, &h);
 
+	label_len = get_hint_label_len();
+	hint_chars = config_get("hint_chars");
+	if (!hint_chars || !hint_chars[0])
+		hint_chars = "abcdefghijklmnopqrstuvwxyz";
+	hint_base = strlen(hint_chars);
+	if (!hint_base)
+		hint_base = 1;
+
+	max_labels = 1;
+	for (size_t k = 0; k < (size_t)label_len; k++) {
+		if (max_labels > MAX_HINTS / hint_base) {
+			max_labels = MAX_HINTS;
+			break;
+		}
+		max_labels *= hint_base;
+	}
+	if (max_labels > MAX_HINTS)
+		max_labels = MAX_HINTS;
+	if (!max_labels)
+		max_labels = 1;
+
+	if (n > max_labels)
+		n = max_labels;
+
 	for (i = 0; i < n; i++) {
 		hints[i].w = w;
 		hints[i].h = h;
@@ -347,8 +412,14 @@ int history_hint_mode()
 		hints[i].x = ents[i].x - w/2;
 		hints[i].y = ents[i].y - h/2;
 
-		hints[i].label[0] = 'a'+i;
-		hints[i].label[1] = 0;
+		{
+			size_t tmp = i;
+			for (int k = label_len - 1; k >= 0; k--) {
+				hints[i].label[k] = hint_chars[tmp % hint_base];
+				tmp /= hint_base;
+			}
+			hints[i].label[label_len] = 0;
+		}
 	}
 
 	return hint_selection(scr, hints, n);
