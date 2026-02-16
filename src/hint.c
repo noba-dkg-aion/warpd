@@ -270,34 +270,28 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 		}
 	}
 
-	get_hint_size(scr, &w, &h);
-
 	for (row = 0; row < nr; row++) {
+		int y0 = (int)(((long long)sh * row) / nr);
+		int y1 = (int)(((long long)sh * (row + 1)) / nr);
 		for (col = 0; col < nc; col++) {
 			size_t idx = (size_t)row * (size_t)nc + (size_t)col;
 			size_t tmp = idx;
 			struct hint *hint;
-			int x, y;
+			int x0 = (int)(((long long)sw * col) / nc);
+			int x1 = (int)(((long long)sw * (col + 1)) / nc);
 
 			if (idx >= total)
 				break;
 			hint = &hints[n++];
 
-			if (nc > 1)
-				x = (int)(((long long)(sw - w) * col) / (nc - 1));
-			else
-				x = (sw - w) / 2;
-
-			if (nr > 1)
-				y = (int)(((long long)(sh - h) * row) / (nr - 1));
-			else
-				y = (sh - h) / 2;
-
-			hint->x = x;
-			hint->y = y;
-
-			hint->w = w;
-			hint->h = h;
+			hint->x = x0;
+			hint->y = y0;
+			hint->w = x1 - x0;
+			hint->h = y1 - y0;
+			if (hint->w < 1)
+				hint->w = 1;
+			if (hint->h < 1)
+				hint->h = 1;
 
 			for (k = label_len - 1; k >= 0; k--) {
 				hint->label[k] = chars[tmp % (size_t)base];
