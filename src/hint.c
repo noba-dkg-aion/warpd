@@ -217,6 +217,7 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 	{
 		int best_nc = 1;
 		int best_nr = (int)total;
+		int have_best = 0;
 		size_t best_waste = (size_t)best_nc * (size_t)best_nr - total;
 		long long best_aspect_err =
 			llabs((long long)best_nc * (long long)sh -
@@ -225,24 +226,39 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 		for (int cand_nr = 1; cand_nr <= (int)total; cand_nr++) {
 			int cand_nc = (int)((total + (size_t)cand_nr - 1) /
 					    (size_t)cand_nr);
+			int cand_cell_w = sw / cand_nc;
+			int cand_cell_h = sh / cand_nr;
 			size_t cand_cap = (size_t)cand_nc * (size_t)cand_nr;
 			size_t cand_waste = cand_cap - total;
 			long long cand_aspect_err =
 				llabs((long long)cand_nc * (long long)sh -
 				      (long long)cand_nr * (long long)sw);
 
-			if (cand_waste < best_waste ||
+			/* Skip layouts that cannot fit hint boxes without overlap. */
+			if (cand_cell_w < w || cand_cell_h < h)
+				continue;
+
+			if (!have_best ||
+			    cand_waste < best_waste ||
 			    (cand_waste == best_waste &&
 			     cand_aspect_err < best_aspect_err)) {
 				best_nc = cand_nc;
 				best_nr = cand_nr;
 				best_waste = cand_waste;
 				best_aspect_err = cand_aspect_err;
+				have_best = 1;
 			}
 		}
 
-		nc = best_nc;
-		nr = best_nr;
+		if (have_best) {
+			nc = best_nc;
+			nr = best_nr;
+		} else {
+			nc = 1;
+			while ((size_t)nc * (size_t)nc < total)
+				nc++;
+			nr = (int)((total + (size_t)nc - 1) / (size_t)nc);
+		}
 	}
 
 	const int colgap = sw / nc - w;
