@@ -270,12 +270,6 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 		}
 	}
 
-	const int colgap = sw / nc - w;
-	const int rowgap = sh / nr - h;
-
-	const int x_offset = (sw - nc * w - (nc - 1) * colgap) / 2;
-	const int y_offset = (sh - nr * h - (nr - 1) * rowgap) / 2;
-
 	get_hint_size(scr, &w, &h);
 
 	for (row = 0; row < nr; row++) {
@@ -283,13 +277,24 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 			size_t idx = (size_t)row * (size_t)nc + (size_t)col;
 			size_t tmp = idx;
 			struct hint *hint;
+			int x, y;
 
 			if (idx >= total)
 				break;
 			hint = &hints[n++];
 
-			hint->x = x_offset + col * (colgap + w);
-			hint->y = y_offset + row * (rowgap + h);
+			if (nc > 1)
+				x = (int)(((long long)(sw - w) * col) / (nc - 1));
+			else
+				x = (sw - w) / 2;
+
+			if (nr > 1)
+				y = (int)(((long long)(sh - h) * row) / (nr - 1));
+			else
+				y = (sh - h) / 2;
+
+			hint->x = x;
+			hint->y = y;
 
 			hint->w = w;
 			hint->h = h;
