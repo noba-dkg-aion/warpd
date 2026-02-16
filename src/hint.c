@@ -210,10 +210,40 @@ static size_t generate_fullscreen_hints(screen_t scr, struct hint *hints)
 	if (total > total_hint_cap)
 		total = total_hint_cap;
 
-	nc = 1;
-	while ((size_t)nc * (size_t)nc < total)
-		nc++;
-	nr = (int)((total + (size_t)nc - 1) / (size_t)nc);
+	/*
+	 * Choose grid dimensions that minimize unused slots first, then keep an
+	 * aspect ratio close to the screen to avoid large empty regions.
+	 */
+	{
+		int best_nc = 1;
+		int best_nr = (int)total;
+		size_t best_waste = (size_t)best_nc * (size_t)best_nr - total;
+		long long best_aspect_err =
+			llabs((long long)best_nc * (long long)sh -
+			      (long long)best_nr * (long long)sw);
+
+		for (int cand_nr = 1; cand_nr <= (int)total; cand_nr++) {
+			int cand_nc = (int)((total + (size_t)cand_nr - 1) /
+					    (size_t)cand_nr);
+			size_t cand_cap = (size_t)cand_nc * (size_t)cand_nr;
+			size_t cand_waste = cand_cap - total;
+			long long cand_aspect_err =
+				llabs((long long)cand_nc * (long long)sh -
+				      (long long)cand_nr * (long long)sw);
+
+			if (cand_waste < best_waste ||
+			    (cand_waste == best_waste &&
+			     cand_aspect_err < best_aspect_err)) {
+				best_nc = cand_nc;
+				best_nr = cand_nr;
+				best_waste = cand_waste;
+				best_aspect_err = cand_aspect_err;
+			}
+		}
+
+		nc = best_nc;
+		nr = best_nr;
+	}
 
 	const int colgap = sw / nc - w;
 	const int rowgap = sh / nr - h;
