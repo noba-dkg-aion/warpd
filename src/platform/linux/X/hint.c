@@ -41,6 +41,7 @@ static XftFont *get_font(const char *name, int width, int height, size_t sample_
 
 	char xftname[256];
 	char sample[32];
+	char sample_ch = 'W';
 	XGlyphInfo e;
 	int font_height;
 	int h;
@@ -58,7 +59,30 @@ static XftFont *get_font(const char *name, int width, int height, size_t sample_
 
 	if (sample_len >= sizeof sample)
 		sample_len = sizeof sample - 1;
-	memset(sample, 'W', sample_len);
+
+	{
+		const char *hint_chars = config_get("hint_chars");
+		if (hint_chars && hint_chars[0]) {
+			/*
+			 * Use a representative character from the active hint charset
+			 * instead of always using 'W' (too conservative for narrow
+			 * alphabets such as ihetanos).
+			 */
+			if (strchr(hint_chars, 'W'))
+				sample_ch = 'W';
+			else if (strchr(hint_chars, 'M'))
+				sample_ch = 'M';
+			else if (strchr(hint_chars, 'w'))
+				sample_ch = 'w';
+			else if (strchr(hint_chars, 'm'))
+				sample_ch = 'm';
+			else if (strchr(hint_chars, 'n'))
+				sample_ch = 'n';
+			else
+				sample_ch = hint_chars[0];
+		}
+	}
+	memset(sample, sample_ch, sample_len);
 	sample[sample_len] = 0;
 
 	h = height;
