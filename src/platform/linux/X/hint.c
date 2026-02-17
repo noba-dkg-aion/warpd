@@ -31,29 +31,60 @@ static XftColor parse_xft_color(const char *s)
 	return color;
 }
 
-static XftFont *get_font(const char *name, int height)
+static XftFont *get_font(const char *name, int width, int height, size_t sample_len)
 {
 	static XftFont *font;
 	static char cached_name[256];
+	static int cached_width;
 	static int cached_height;
+	static size_t cached_sample_len;
 
 	char xftname[256];
+	char sample[32];
+	XGlyphInfo e;
+	int font_height;
 	int h;
 
 	if (!strcmp(cached_name, name) &&
-		    cached_height == height)
+	    cached_width == width &&
+	    cached_height == height &&
+	    cached_sample_len == sample_len)
 		return font;
 
 	strcpy(cached_name, name);
+	cached_width = width;
 	cached_height = height;
+	cached_sample_len = sample_len;
+
+	if (sample_len >= sizeof sample)
+		sample_len = sizeof sample - 1;
+	memset(sample, 'W', sample_len);
+	sample[sample_len] = 0;
 
 	h = height;
 	do {
 		snprintf(xftname, sizeof xftname, "%s:pixelsize=%d", name, h);
 		font = XftFontOpenName(dpy, DefaultScreen(dpy), xftname);
+		if (!font) {
+			h--;
+			continue;
+		}
+
+		XftTextExtentsUtf8(dpy, font, (FcChar8 *)sample, sample_len, &e);
+		font_height = font->ascent + font->descent;
+		if (font_height <= height && (int)e.width <= width)
+			break;
+
+		XftFontClose(dpy, font);
+		font = NULL;
 
 		h--;
-	} while (font->height > height);
+	} while (h > 1);
+
+	if (!font) {
+		snprintf(xftname, sizeof xftname, "%s:pixelsize=1", name);
+		font = XftFontOpenName(dpy, DefaultScreen(dpy), xftname);
+	}
 
 	return font;
 }
@@ -68,8 +99,15 @@ static int draw_text(Drawable drw, int x, int y, int w, int h,
 
 	XGlyphInfo e;
 	int font_height;
+	int inner_w = w - 4;
+	int inner_h = h - 3;
 
-	font = get_font(fontname, h - 3);
+	if (inner_w < 1)
+		inner_w = 1;
+	if (inner_h < 1)
+		inner_h = 1;
+
+	font = get_font(fontname, inner_w, inner_h, strlen(s));
 	col = parse_xft_color(fgcolor);
 
 	xftdrw = XftDrawCreate(dpy, drw, DefaultVisual(dpy, DefaultScreen(dpy)),
